@@ -353,17 +353,21 @@ demo = gr.ChatInterface(
     theme="soft"
 )
 
+# Clean vector database directory for a fresh start
+clean_vector_db_directory()
+
+# Ensure PDF is downloaded
+download_pdf()
+
+# Initialize the database once at startup
+logger.info("Initializing vector database at startup...")
+initialize_database()
+logger.info("Database initialization complete")
+
+# For Vercel deployment - expose the app
+app = demo.app
+
+# For local development
 if __name__ == "__main__":
-    # Clean vector database directory for a fresh start
-    clean_vector_db_directory()
-    
-    # Ensure PDF is downloaded
-    download_pdf()
-    
-    # Initialize the database once at startup
-    logger.info("Initializing vector database at startup...")
-    initialize_database()
-    logger.info("Database initialization complete")
-    
     # Launch the interface
     demo.launch()
