@@ -16,6 +16,7 @@ import re
 import time
 import chromadb
 from chromadb.utils import embedding_functions
+import tempfile
 
 # Configure logging
 logging.basicConfig(
@@ -29,8 +30,6 @@ load_dotenv()
 
 # Constants
 PDF_URL = "https://www.aetnabetterhealth.com/content/dam/aetna/medicaid/illinois/pdf/ABHIL_Member_Handbook.pdf"
-PDF_LOCAL_PATH = "./data/pdf/ABHIL_Member_Handbook.pdf"
-VECTOR_DB_PATH = "./data/vector_db"
 APP_TITLE = "Aetna Better Health Illinois Member Handbook Chatbot (RAG Enhanced)"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
@@ -41,61 +40,42 @@ if not api_key:
     raise ValueError("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
 client = OpenAI(api_key=api_key)
 
-# Ensure directories exist
-os.makedirs(os.path.dirname(PDF_LOCAL_PATH), exist_ok=True)
-os.makedirs(VECTOR_DB_PATH, exist_ok=True)
-
-def clean_vector_db_directory():
-    """
-    Clean the vector database directory to ensure a fresh start.
-    """
-    import shutil
-    if os.path.exists(VECTOR_DB_PATH):
-        try:
-            shutil.rmtree(VECTOR_DB_PATH)
-            logger.info(f"Removed existing vector database directory: {VECTOR_DB_PATH}")
-        except Exception as e:
-            logger.error(f"Error removing vector database directory: {str(e)}")
-    
-    # Recreate the directory
-    os.makedirs(VECTOR_DB_PATH, exist_ok=True)
+# Initialize ChromaDB in memory
+chroma_client = chromadb.Client()
+collection = None
 
 def download_pdf():
-    """Download the PDF if it doesn't exist locally."""
-    if not os.path.exists(PDF_LOCAL_PATH):
-        logger.info(f"Downloading PDF from {PDF_URL}")
-        try:
-            response = requests.get(PDF_URL, stream=True)
-            response.raise_for_status()
-            
-            with open(PDF_LOCAL_PATH, 'wb') as pdf_file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    pdf_file.write(chunk)
-            
-            logger.info(f"PDF downloaded to {PDF_LOCAL_PATH}")
-        except Exception as e:
-            logger.error(f"Error downloading PDF: {str(e)}")
-            raise
-    else:
-        logger.info(f"PDF already exists at {PDF_LOCAL_PATH}")
-    
-    return PDF_LOCAL_PATH
+    """Download the PDF file to a temporary location."""
+    try:
+        response = requests.get(PDF_URL)
+        response.raise_for_status()
+        
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+            temp_file.write(response.content)
+            return temp_file.name
+    except Exception as e:
+        logger.error(f"Error downloading PDF: {e}")
+        raise
 
-def extract_text_from_pdf():
-    """Extract text from the PDF."""
+def extract_text_from_pdf(pdf_path):
+    """Extract text from the PDF file."""
     try:
         text = ""
-        with open(PDF_LOCAL_PATH, 'rb') as file:
+        with open(pdf_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
-            for page_num in range(len(pdf_reader.pages)):
-                page = pdf_reader.pages[page_num]
-                page_text = page.extract_text()
-                text += f"Page {page_num + 1}:\n{page_text}\n\n"
-        
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
         return text
     except Exception as e:
-        logger.error(f"Error extracting text from PDF: {str(e)}")
+        logger.error(f"Error extracting text from PDF: {e}")
         raise
+    finally:
+        # Clean up the temporary file
+        try:
+            os.unlink(pdf_path)
+        except:
+            pass
 
 def chunk_text(text, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
     """
@@ -257,30 +237,37 @@ def query_vector_db(collection, query, n_results=5):
 
 # Global variables for caching
 pdf_text = None
-collection = None
 conversation_history = []
 
 def initialize_database():
-    """Initialize the vector database once at startup."""
-    global pdf_text, collection
+    """Initialize the vector database with the PDF content."""
+    global collection
     
-    # Download PDF if needed
-    if not os.path.exists(PDF_LOCAL_PATH):
-        download_pdf()
-    
-    # Extract text from PDF
-    pdf_text = extract_text_from_pdf()
-    logger.info("PDF text extracted")
-    
-    # Chunk text
-    chunks = chunk_text(pdf_text)
-    logger.info(f"Text split into {len(chunks)} chunks")
-    
-    # Create vector database
-    collection = create_vector_db(chunks)
-    logger.info("Vector database created and ready for queries")
-    
-    return collection
+    try:
+        # Create a new collection
+        collection = chroma_client.create_collection(
+            name="aetna_handbook",
+            embedding_function=embedding_functions.OpenAIEmbeddingFunction(
+                api_key=api_key,
+                model_name="text-embedding-ada-002"
+            )
+        )
+        
+        # Download and process PDF
+        pdf_path = download_pdf()
+        text = extract_text_from_pdf(pdf_path)
+        chunks = chunk_text(text)
+        
+        # Add chunks to the collection
+        collection.add(
+            documents=chunks,
+            ids=[f"chunk_{i}" for i in range(len(chunks))]
+        )
+        
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        raise
 
 def chat(message, history):
     """Process a chat message and return a response."""
@@ -352,12 +339,6 @@ demo = gr.ChatInterface(
     ],
     theme="soft"
 )
-
-# Clean vector database directory for a fresh start
-clean_vector_db_directory()
-
-# Ensure PDF is downloaded
-download_pdf()
 
 # Initialize the database once at startup
 logger.info("Initializing vector database at startup...")
